@@ -45,6 +45,7 @@ or a `dB` value (case-sensitive).
 | `blackdetect` | frame is mostly black | `threshold=0.98`, `pixel-black=0.10` (wrap in `not` to cut black) |
 | `subtitle`/`regex` | a subtitle line matches `pattern` | `pattern` (required), `ignore-case=#f` |
 | `word` | a whole word appears in subtitles | `value` (required), `ignore-case=#t` |
+| `hesitation` | speech, or a pause that ends a sentence (see below) | `threshold=auto`, `min-pause=0.5s`, `sentence-pause=1.5s`, `seam=0.04`, `subtitle=auto`, `model` |
 | `1` / `0` | **every** / **no** moment is active (keep-all / cut-all) | aliases `none` / `all`; a base for manual ranges |
 
 ```bash
@@ -93,6 +94,34 @@ auto-editor talk.mp4 --edit audio:-30dB --edit:2 audio:-12dB --when:2 speed:1.5
 `--edit:0` is rejected — label 0 is the implicit silent class; use `--when:0` to
 act on silent moments. (The `--edit 1` / `--edit 0` *values* above are unrelated:
 they set label 1's expression to the all-true / all-false constant.)
+
+### Cut hesitations, keep sentence pauses — `--edit hesitation`
+
+`hesitation` keeps all speech and the pauses that end a sentence, and cuts the
+pauses where the speaker stalled mid-sentence (lost their words, froze, then
+went on). It works in any language.
+
+```bash
+auto-editor talk.mp4 --edit hesitation                    # talk.srt next to it is used if present
+auto-editor whisper talk.mp4 ggml-large-v3-turbo.bin -o talk.srt   # make that transcript
+auto-editor talk.mp4 --edit 'hesitation:model="ggml-large-v3-turbo.bin"'  # or transcribe in one go (cached)
+auto-editor talk.mp4 --edit hesitation --margin 0.1s      # tighter: keep 0.1 s around each cut
+auto-editor talk.mp4 --edit hesitation --preview --debug  # list every pause and why it was or wasn't cut
+```
+
+- **Sentence end or not**: from the transcript's punctuation (`.`, `!`, `?`; a
+  comma, `;`, `:` or dash too unless `commas=#f`; `...` is a hesitation).
+  With no transcript, from the voice (`prosody`): pitch falling/rising well away
+  from the phrase and fading out end a sentence; level pitch or a held
+  "uhh/euh/äh/ờ" doesn't. Prosody is a fallback — a transcript is far more
+  reliable, especially for tonal languages like Vietnamese.
+- **Only invisible cuts**: a cut joins frames that look alike (`seam`, default
+  `0.04`). If the speaker moved during the pause, the cut shrinks to the part
+  where frames match, or the pause is kept. `seam=1` turns this off.
+- **Long sentence pauses** are trimmed to `sentence-pause` (default `1.5s`;
+  `none` keeps them whole). Pauses shorter than `min-pause` (`0.5s`) are left
+  alone. `threshold` (default `auto`) is the RMS level of silence, e.g. `-45dB`.
+- Path arguments need quotes, since the `--edit` syntax ends a bare word at `.`.
 
 ## 2. Set the pace — `--margin` and `--smooth`
 

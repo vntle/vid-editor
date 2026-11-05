@@ -1,8 +1,10 @@
 from ../log import AutoEditorError, error
 from std/math import floor, ceil
+from std/strutils import replace
 
 import ../[av, ffmpeg]
 import ../util/rational
+import ../lib/hesitation
 import ../vendor/tinyre/tinyre
 
 proc subtitle*(container: InputContainer, tb: AVRational, pattern: Re,
@@ -70,3 +72,46 @@ proc subtitle*(container: InputContainer, tb: AVRational, pattern: Re,
       val[i] = true
 
   return (-1, val)
+
+proc subtitleCues*(container: InputContainer, tb: AVRational,
+    stream: int16): (int32, seq[Cue]) {.raises: [AutoEditorError].} =
+  ## Every text cue of subtitle `stream`, timed in `tb` units. Like `subtitle`,
+  ## returns the stream back when there is no such stream, -1 otherwise.
+  if stream < 0 or stream >= container.subtitle.len:
+    return (stream, @[])
+
+  let formatCtx = container.formatContext
+  let s = container.subtitle[stream].index
+  var codecCtx = initDecoder(formatCtx.streams[s].codecpar)
+  defer: avcodec_free_context(addr codecCtx)
+  let packet = av_packet_alloc()
+  if packet == nil:
+    error "Could not allocate packet"
+  defer: av_packet_free(addr packet)
+
+  let timeBase = container.subtitle[stream].time_base
+  discard av_seek_frame(formatCtx, -1, 0, AVSEEK_FLAG_BACKWARD)
+
+  var cues: seq[Cue]
+  var sub: AVSubtitle
+  while av_read_frame(formatCtx, packet) >= 0:
+    defer: av_packet_unref(packet)
+    if packet.stream_index != s or packet.pts == AV_NOPTS_VALUE or
+        packet.duration <= 0:
+      continue
+    let start = float(packet.pts * timeBase)
+    let dur = float(packet.duration * timeBase)
+    var gotSubtitle: cint = 0
+    if avcodec_decode_subtitle2(codecCtx, addr sub, addr gotSubtitle, packet) >= 0 and
+        gotSubtitle != 0:
+      defer: avsubtitle_free(addr sub)
+      var text = ""
+      for i in 0 ..< sub.num_rects:
+        let rect = sub.rects[i]
+        if rect.`type` == SUBTITLE_ASS and rect.ass != nil:
+          if text.len > 0: text.add ' '
+          text.add dialogue($rect.ass)
+      if text.len > 0:
+        cues.add Cue(start: start * tb.float64, stop: (start + dur) * tb.float64,
+          text: text.replace("\\N", " ").replace("\\n", " "))
+  (-1'i32, cues)

@@ -1,7 +1,7 @@
-import std/[math, options, os, sequtils, strformat, strutils]
-import ./[av, editexpr, editlexer, editparse, ffmpeg, log]
-import ./analyze/[audio, blackdetect, motion, subtitle]
-import ./lib/[audioutil, dnorm16]
+import std/[cpuinfo, math, options, os, sequtils, strformat, strutils]
+import ./[av, cache, editexpr, editlexer, editparse, ffmpeg, log, transcribe]
+import ./analyze/[audio, blackdetect, motion, scene, speech, subtitle]
+import ./lib/[audioutil, dnorm16, hesitation]
 import ./util/[bar, fun, rational]
 
 import ./vendor/tinyre/tinyre
@@ -12,7 +12,7 @@ type
 
   EditSymbol = enum
     esUnknown, esZero, esOne, esOr, esAnd, esXor, esNot, esAudio, esMotion,
-    esBlackdetect, esSubtitle, esRegex, esWord, esNone, esAll
+    esBlackdetect, esSubtitle, esRegex, esWord, esHesitation, esNone, esAll
 
 func normSymbol(expr: Expr, text: string): NormSymbol =
   if expr.symbolEquals(text, "ebu"): nsEbu
@@ -32,6 +32,7 @@ func editSymbol(expr: Expr, text: string): EditSymbol =
   elif expr.symbolEquals(text, "subtitle"): esSubtitle
   elif expr.symbolEquals(text, "regex"): esRegex
   elif expr.symbolEquals(text, "word"): esWord
+  elif expr.symbolEquals(text, "hesitation"): esHesitation
   elif expr.symbolEquals(text, "none"): esNone
   elif expr.symbolEquals(text, "all"): esAll
   else: esUnknown
@@ -103,6 +104,13 @@ proc parseBool(val: string): bool =
   if val == "#f" or val == "false":
     return false
   error "Invalid boolean (expected true or false): " & val
+
+proc parseEditTime(val: string): EditTime =
+  let t = parseTimeSimple(val)
+  if t.getFlag:
+    EditTime(value: t.getNumber.float64 / 1000.0)
+  else:
+    EditTime(value: t.getNumber.float64, units: true)
 
 proc checkedArgs(expressions: openArray[Expr], text: string,
     argOrder: openArray[string]): seq[BoundEditArg] =
@@ -297,6 +305,45 @@ proc parseEdit*(source: string, filename = "--edit"): EditExpr =
       if m.stream < 0:
         error "word: 'all' stream is not supported"
       return edit(m)
+    of esHesitation:
+      var m = hesitationMethod()
+      for (argPos, val) in checkedMethodArgs("hesitation", node[1 ..< node.len], text):
+        case argPos:
+        of 0:
+          m.silenceDb =
+            if val == "auto": NaN.float32
+            else:
+              let t = parseThres(val).toFloat32
+              if t <= 0: -100'f32 else: max(20 * log10(t), -100'f32)
+        of 1:
+          m.stream = parseStream(val)
+          if m.stream < 0: error "hesitation: 'all' stream is not supported"
+        of 2: m.minPause = parseEditTime(val)
+        of 3:
+          if val == "none":
+            m.trimSentences = false
+          else:
+            m.trimSentences = true
+            m.sentencePause = parseEditTime(val)
+        of 4: m.seam = parseThres(val).toFloat32
+        of 5: m.video = parseNat(val)
+        of 6:
+          m.subtitles =
+            if val == "auto": -1
+            elif val == "none": -2
+            else: parseStream(val)
+          if m.subtitles == -1 and val == "all":
+            error "hesitation: 'all' subtitle streams is not supported"
+        of 7: m.commas = parseBool(val)
+        of 8: m.prosody = parseBool(val)
+        of 9: m.model = val
+        of 10: m.language = val
+        else: error "Too many args"
+      if m.minPause.value <= 0:
+        error "hesitation: min-pause must be greater than 0"
+      if m.trimSentences and m.sentencePause.value < 0:
+        error "hesitation: sentence-pause must be 0 or greater"
+      return edit(m)
     of esNone: return edit(noneMethod())
     of esAll: return edit(allMethod())
     else:
@@ -317,24 +364,99 @@ proc parseEdit*(source: string, filename = "--edit"): EditExpr =
     error "Should never happen"
   toExpr(expr, parser.lexer.sourceText)
 
+proc transcriptCues(input, model, language: string, tb: AVRational): seq[Cue] =
+  ## Transcribe `input` a word to a cue with `model`, once: the transcript is
+  ## cached until `input` changes.
+  if not fileExists(model) and model != "apple":
+    error &"hesitation: model not found: {model}"
+  let srt = cacheSidecar(input, "transcript", &"{model.absolutePath}:{language}", ".srt")
+  debug &"hesitation: transcript at {srt}"
+  if not fileExists(srt) or noCache:
+    conwrite &"Transcribing with {model.extractFilename}"
+    let partial = srt & ".part"
+    var stop = false
+    transcribeFile(input, model, language, max(1, min(countProcessors(), 8)),
+      partial, addr stop)
+    try: moveFile(partial, srt)
+    except OSError as e: error &"hesitation: could not keep the transcript: {e.msg}"
+  var container = (try: av.open(srt) except IOError as e: error e.msg)
+  defer: container.close()
+  subtitleCues(container, tb, 0)[1]
+
+proc hesitationCues(container: InputContainer, input: string, tb: AVRational,
+    stream: int, model, language: string): seq[Cue] =
+  ## The transcript the `hesitation` method reads sentence ends from: made with
+  ## `model`, subtitle `stream`, or with -1 the first one there is, embedded or
+  ## a sidecar.
+  if model != "":
+    return transcriptCues(input, model, language, tb)
+  if stream == -2:
+    return @[]
+  let want = max(stream, 0).int16
+  let (ret, cues) = subtitleCues(container, tb, want)
+  # A picture-based stream has no text; `auto` then looks for a sidecar.
+  if ret == -1 and (cues.len > 0 or stream >= 0):
+    return cues
+  let sidecar = findExternSubs(input)
+  if sidecar.isNone():
+    if stream >= 0:
+      error &"hesitation: subtitle stream '{stream}' does not exist."
+    return @[]
+  let external = sidecar.unsafeGet()
+  defer: external.close()
+  let index = int16(max(stream, container.subtitle.len) - container.subtitle.len)
+  let (ret2, cues2) = subtitleCues(external, tb, index)
+  if ret2 != -1 and stream >= 0:
+    error &"hesitation: subtitle stream '{stream}' does not exist."
+  cues2
+
+proc reportPauses(pauses: seq[Pause], thresholdDb: float32, fps: float64,
+    cues: int) =
+  if not isDebug:
+    return
+  func ts(f: int): string =
+    let secs = f.float64 / fps
+    &"{int(secs) div 60}:{secs - float64(int(secs) div 60 * 60):05.2f}"
+  debug &"hesitation: silence below {thresholdDb:.1f} dBFS RMS; " &
+    (if cues > 0: &"{cues} transcript cues" else: "no transcript")
+  var counts: array[PauseKind, int]
+  var cutFrames = 0
+  for p in pauses:
+    inc counts[p.kind]
+    let span = &"{ts(p.start)}-{ts(p.stop)} ({float64(p.stop - p.start) / fps:.2f}s)"
+    var line = &"  {span:<24} {p.kind:<10} {p.why}"
+    if p.kind != pkEdge:
+      if p.cutA < p.cutB:
+        cutFrames += p.cutB - p.cutA
+        line &= &" => cut {ts(p.cutA)}-{ts(p.cutB)}, frames differ {p.seam:.3f}"
+      elif p.note == "":
+        line &= " => kept"
+      if p.note != "":
+        line &= " (" & p.note & ")"
+    debug line
+  debug &"hesitation: {counts[pkHesitation]} hesitations, {counts[pkSentence]} " &
+    &"sentence ends, {counts[pkPhrase]} phrase ends; " &
+    &"{float64(cutFrames) / fps:.2f}s cut from pauses"
+
 proc evalEdit(e: EditExpr, container: InputContainer, input: string,
-    tb: AVRational, bar: Bar): seq[bool] =
-  ## Which frames of `input` at `tb` `e` marks active.
+    tb: AVRational, bar: Bar, margin: tuple[start, stop: int]): seq[bool] =
+  ## Which frames of `input` at `tb` `e` marks active. `margin` is what
+  ## `--margin` will add back around active frames, in timebase units.
   case e.op
   of eoOr:
-    result = evalEdit(e.operands[0], container, input, tb, bar)
+    result = evalEdit(e.operands[0], container, input, tb, bar, margin)
     for i in 1 ..< e.operands.len:
-      result = result or evalEdit(e.operands[i], container, input, tb, bar)
+      result = result or evalEdit(e.operands[i], container, input, tb, bar, margin)
   of eoAnd:
-    result = evalEdit(e.operands[0], container, input, tb, bar)
+    result = evalEdit(e.operands[0], container, input, tb, bar, margin)
     for i in 1 ..< e.operands.len:
-      result = result and evalEdit(e.operands[i], container, input, tb, bar)
+      result = result and evalEdit(e.operands[i], container, input, tb, bar, margin)
   of eoXor:
-    result = evalEdit(e.operands[0], container, input, tb, bar)
+    result = evalEdit(e.operands[0], container, input, tb, bar, margin)
     for i in 1 ..< e.operands.len:
-      result = result xor evalEdit(e.operands[i], container, input, tb, bar)
+      result = result xor evalEdit(e.operands[i], container, input, tb, bar, margin)
   of eoNot:
-    return not evalEdit(e.operands[0], container, input, tb, bar)
+    return not evalEdit(e.operands[0], container, input, tb, bar, margin)
   of eoMethod:
     let m = e.m
     case m.kind
@@ -402,6 +524,28 @@ proc evalEdit(e: EditExpr, container: InputContainer, input: string,
           error &"{name}: subtitle stream '{ret2}' does not exist."
         return val2
       return val
+    of ekHesitation:
+      if m.stream >= container.audio.len:
+        error &"hesitation: audio stream '{m.stream}' does not exist."
+      let fps = tb.float64
+      let sp = speech(bar, container, input, tb, m.stream.int16)
+      var thumbs: Thumbs
+      if m.video < container.video.len:
+        let sc = scene(bar, container, input, tb, m.video.int16)
+        thumbs = Thumbs(data: sc.thumbs, size: thumbSize)
+      elif m.video != 0:
+        error &"hesitation: video stream '{m.video}' does not exist."
+      let cues = hesitationCues(container, input, tb, m.subtitles, m.model,
+        m.language)
+      let cfg = HesitationConfig(thresholdDb: m.silenceDb,
+        minPause: max(1, m.minPause.toTb(fps)),
+        sentencePause: (if m.trimSentences: m.sentencePause.toTb(fps) else: -1),
+        seam: m.seam, prosody: m.prosody, commas: m.commas, startMargin: margin.start,
+        endMargin: margin.stop, fps: fps)
+      let verdict = judge(Prosody(rms: sp.rms, f0: sp.f0, clarity: sp.clarity),
+        thumbs, cues, cfg)
+      reportPauses(verdict.pauses, verdict.thresholdDb, fps, cues.len)
+      return verdict.active
     of ekNone:
       let length = mediaLength(container)
       let tbLength = (round((length * tb).float64)).int
@@ -411,8 +555,10 @@ proc evalEdit(e: EditExpr, container: InputContainer, input: string,
 
 proc interpretEdit*(args: mainArgs, container: InputContainer, input: string,
     tb: AVRational, bar: Bar): seq[uint8] =
+  let tbf = tb.float64
+  let margin = (start: toTb(args.margin[0], tbf), stop: toTb(args.margin[1], tbf))
   # Label 1: the default `--edit` method. Maps the boolean mask onto 0/1.
-  let base = evalEdit(args.edit, container, input, tb, bar)
+  let base = evalEdit(args.edit, container, input, tb, bar, margin)
   result = newSeq[uint8](base.len)
   for i in 0 ..< base.len:
     if base[i]:
@@ -422,7 +568,7 @@ proc interpretEdit*(args: mainArgs, container: InputContainer, input: string,
   # be longer than the running result (e.g. differing stream lengths); extend
   # with 0 (silent) so the merge covers every sample.
   for le in args.labeledEdits:
-    let mask = evalEdit(le.expr, container, input, tb, bar)
+    let mask = evalEdit(le.expr, container, input, tb, bar, margin)
     if mask.len > result.len:
       result.setLen(mask.len)
     let lbl = uint8(le.label)

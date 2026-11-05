@@ -60,6 +60,20 @@ Different editing methods can be used together.
 auto-editor example.mp4 --edit "(or audio:0.03 motion:0.06)"
 ```
 
+### Cutting Hesitations
+`--edit hesitation` cuts only the pauses where you stalled mid-sentence, such as when you lost your words and froze until they came back, and keeps the pauses between sentences. It works in any language. A cut is only made where the frames it joins look alike, so it can't be seen.
+
+```
+# Uses talk.srt next to the video, if there is one, to tell where sentences end.
+auto-editor talk.mp4 --edit hesitation
+
+# Transcribe first (cached), with a whisper or parakeet model.
+auto-editor talk.mp4 --edit 'hesitation:model="ggml-large-v3-turbo.bin"'
+
+# See every pause and why it was or wasn't cut.
+auto-editor talk.mp4 --edit hesitation --preview --debug
+```
+
 You can also use `dB` unit, a volume unit familiar to video-editors (case-sensitive):
 ```
 auto-editor example.mp4 --edit audio:-19dB

@@ -49,6 +49,9 @@ proc parseLevelsMethod(editStr: string): EditMethod =
     except ValueError as e: error &"levels --edit: {e.msg}"
   )
 
+  if parsed.name == "hesitation":
+    error "levels --edit: hesitation has no levels; it judges pauses instead"
+
   result = case parsed.name
     of "audio": audioMethod(stream = 0)
     of "motion": motionMethod()
@@ -87,7 +90,7 @@ proc parseLevelsMethod(editStr: string): EditMethod =
       of 1: result.stream = parseStream(value)
       of 2: result.ignoreCase = parseBool(value)
       else: error "Too many args"
-    of ekNone, ekAll:
+    of ekHesitation, ekNone, ekAll:
       discard
 
 const levelsArgumentOptions = {coEdit, coTimebase, coDisplay}

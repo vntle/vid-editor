@@ -70,6 +70,38 @@ const editMethodDefs*: seq[EditMethodDef] = @[
     help: "When `value`, matched as a whole word, appears in a subtitle line, " &
           "consider the time that line occupies as loud. Case-insensitive by " &
           "default."),
+  EditMethodDef(names: @["hesitation"], media: emAudio,
+    params: @[p("threshold", "(U Unorm16 'auto)", "auto"),
+              p("stream", "Natural", "0"),
+              p("min-pause", "Time", "0.5s"),
+              p("sentence-pause", "(U Time 'none)", "1.5s"),
+              p("seam", "Unorm16", "0.04"),
+              p("video", "Natural", "0"),
+              p("subtitle", "(U Natural 'auto 'none)", "auto"),
+              p("commas", "Bool", "#t"),
+              p("prosody", "Bool", "#t"),
+              p("model", "String", "\"\""),
+              p("language", "String", "auto")],
+    help: "Mark speech, and the pauses that end a sentence, as loud; mark " &
+          "the pauses where the speaker hesitated mid-sentence as silent. A " &
+          "pause is silence at least `min-pause` long, where silence is " &
+          "quieter than `threshold` (an RMS level; `auto` places it between " &
+          "the room and the voice). A transcript says whether a sentence " &
+          "ended before a pause: `subtitle` picks its stream, or a sidecar " &
+          ".srt/.ass such as `auto-editor whisper` makes; `auto` uses one if " &
+          "there is one. Or set `model` to a whisper or parakeet model to " &
+          "transcribe the audio first, in `language`. With `commas`, a pause " &
+          "at a comma, semicolon, colon or dash counts as a sentence end. " &
+          "Without a transcript, `prosody` judges by the voice, in any " &
+          "language: pitch falling well below the phrase or rising well " &
+          "above it, and the voice fading out, end a sentence; a level pitch " &
+          "or a held \"uhh\" does not. A sentence-end pause longer than " &
+          "`sentence-pause` is trimmed to it; `none` keeps them whole. A cut " &
+          "is only made where the frames it joins differ by at most `seam` " &
+          "(0-1), so it can't be seen; when they differ, the cut shrinks to " &
+          "frames that match, or the pause stays. Silence before the first " &
+          "and after the last word is always silent. `--margin` is kept " &
+          "around every cut."),
 ]
 
 const editOperatorDefs*: seq[EditOperatorDef] = @[

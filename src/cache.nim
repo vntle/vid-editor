@@ -70,6 +70,14 @@ proc cacheDir(): string = getTempDir() / &"ae-{version}"
 proc cacheFilePath(path: AbsPath, tb: AVRational, kind, args: string): string =
   cacheDir() / &"{procTag(path, tb, kind, args)}.bin"
 
+proc cacheSidecar*(path, kind, args, ext: string): string =
+  ## Where to keep a file derived from `path`, such as a transcript, so it's
+  ## made again only when `path` changes. The directory is created.
+  let workdir = cacheDir()
+  try: createDir(workdir)
+  except OSError: discard
+  workdir / procTag(path.absPath, AVRational(num: 1, den: 1), kind, args) & ext
+
 proc readCache*[T](path: string, tb: AVRational, kind, args: string): Option[seq[T]] =
   try:
     return some(loadCache[T](cacheFilePath(path.absPath, tb, kind, args)))
