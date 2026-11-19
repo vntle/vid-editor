@@ -8,8 +8,10 @@
  - Every transition in Premiere Pro, from `push` and `clock-wipe` to `glitch` and `page-peel`, plus its Legacy folder (`iris-round`, `barn-doors`, `push-legacy`, …) and the `constant-power` and `exponential-fade` audio crossfades: `--transition push:0.5sec`. They render natively, and `premiere-otio` exports them as Premiere's own transitions. FCP7 XML carries the dips and `wipe`; other editor exports dissolve instead.
  - Speed ramps: `speed` and `varispeed` take keyframes spread across a section's source, such as `speed:1..8:ease=in` or `speed:1@0%..6@50%..1`. Final Cut Pro and DaVinci Resolve (FCPXML) keep the ramp both ways, including ramps made with Final Cut Pro's Retime menu. Premiere, Shotcut and Kdenlive play the section at the ramp's mean speed.
  - FCP7 XML import brings in Color mattes and Slugs as solid clips, and reads a time remap graph as a speed ramp.
+ - A render or timeline export ends by saying where it wrote the result and how long that runs, such as `Wrote example_ALTERED.mp4, 0:00:17 long`. Timeline exports used to finish without a word.
 
 ## Performance
+ - Each audio stream encodes on its own thread, alongside the video and the other streams, instead of taking turns with them. A 10-minute edit to mp4 renders 1.5× faster, a file with two audio tracks 1.7× faster, and the output is byte-for-byte the same.
  - A source that plays in two places at once, as across a dissolve or as a picture-in-picture or `loop` overlay of the same file, gets its own decoder for each instead of seeking back to a keyframe every frame. An edit with 1-second dissolves renders 2.5× faster, and a same-file overlay up to 40× faster.
  - Rendering no longer slows down quadratically with the number of clips: 160,000 one-frame clips render in 1.6 seconds instead of 58.
  - Importing FCP7 XML uses about 10% less memory.

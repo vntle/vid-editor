@@ -617,6 +617,13 @@ proc planEdit*(args: var mainArgs): EditPlan =
     prevEnd = stop
   if prevEnd > 0: result.sourceFrames.add prevEnd
 
+proc reportOutput(path: string, tl: v3) {.raises: [].} =
+  ## Say where the result went and how long it runs.
+  if quiet or path == "-" or not tl.tb.isValid:
+    return
+  let seconds = tl.len.float64 / tl.tb.float64
+  notice &"Wrote {path}, {toTimecode(seconds, Code.display)} long"
+
 proc editMedia*(args: var mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
     startTime: float = log.start) =
   av_log_set_level(AV_LOG_QUIET)
@@ -675,9 +682,11 @@ proc editMedia*(args: var mainArgs, inputVideo: VideoSettings, audio: AudioSetti
   case exportKind:
   of exV1, exV2, exV3:
     exportJsonTl(tlV3, exportKind, output)
+    reportOutput(output, tlV3)
     return
   of exPremiere:
     fcp7WriteXml(tlName, output, false, tlV3)
+    reportOutput(output, tlV3)
     return
   of exResolveFcp7:
     # Resolve reads only a file's first audio stream from FCP7 XML
@@ -685,22 +694,28 @@ proc editMedia*(args: var mainArgs, inputVideo: VideoSettings, audio: AudioSetti
     # multi-track audio into per-stream wavs like the fcpxml resolve export.
     tlV3.setStreamTo0(interner)
     fcp7WriteXml(tlName, output, true, tlV3)
+    reportOutput(output, tlV3)
     return
   of exFinalCutPro:
     fcp11WriteXml(tlName, fcpVersion, output, false, tlV3)
+    reportOutput(output, tlV3)
     return
   of exResolve:
     tlV3.setStreamTo0(interner)
     fcp11WriteXml(tlName, fcpVersion, output, true, tlV3)
+    reportOutput(output, tlV3)
     return
   of exShotcut:
     shotcutWriteMlt(output, tlV3)
+    reportOutput(output, tlV3)
     return
   of exKdenlive:
     kdenliveWrite(output, tlV3)
+    reportOutput(output, tlV3)
     return
   of exPremiereOtio:
     otioWrite(tlName, output, tlV3)
+    reportOutput(output, tlV3)
     return
   of exDefault, exClipSequence:
     discard
@@ -746,8 +761,13 @@ proc editMedia*(args: var mainArgs, inputVideo: VideoSettings, audio: AudioSetti
       applyArgs(myTimeline, args, audio)
       makeMedia(args, video, audio, myTimeline, appendFilename(output, &"-{clipNum}"), rule,
         bar, cache)
+    if not quiet and clips2.len > 0:
+      let first = appendFilename(output, "-0")
+      let last = appendFilename(output, &"-{clips2.len - 1}")
+      notice &"Wrote {clips2.len} clips, {first} to {last}"
   else:
     makeMedia(args, video, audio, tlV3, output, rule, bar, cache)
+    reportOutput(output, tlV3)
 
   # Retiming embedded subtitles is handled by makeMedia. Also retime every
   # subtitle-only sibling of each original media input into its own sidecar.
