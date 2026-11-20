@@ -14,10 +14,15 @@
  - Rendering no longer slows down quadratically with the number of clips: 160,000 one-frame clips render in 1.6 seconds instead of 58.
  - Importing FCP7 XML uses about 10% less memory.
  - `blackdetect` is 3.2× faster and `motion` 1.6× faster. Both now read a frame's true luma instead of a gray recomputed through RGB, so `motion` values run about 8% lower and `blackdetect` can shift a few frames at the end of a fade.
+ - A source whose size differs from the timeline's, as with `--resolution` or inputs of mixed sizes, is fitted to the canvas with one reused scaler instead of a new one every frame. Video transitions reuse theirs the same way.
+ - An `add:` audio layer that plays under many cuts no longer has its remaining audio copied after each cut.
+ - `--audio-normalize peak` finds the peak without a `log10` per sample, and audio at unity gain skips a rounding call per sample.
+ - `levels` writes its output in one go instead of flushing stdout for every frame.
 
 ## Fixes
  - FCP7 XML import plays each audio track from the right stream of a multi-stream source, instead of the first stream for all of them, and keeps a mono source mono.
  - FCP7 XML import skips disabled clips, no longer turns Premiere's untouched opacity into an effect on every clip, and warns about the titles and nested sequences it leaves out. It is no longer experimental.
+ - A missing input is reported before any analysis, with a "Did you mean" for a similarly named file beside it, and a missing timeline file (`.v3`, `.xml`) no longer ends in an uncaught error. A single-dash typo like `-margin` suggests `--margin`.
  - FCP7 XML export writes Premiere's exact source times (`pproTicksIn`/`pproTicksOut`), and import reads them, so clips at fractional speeds keep their in points. Reversed and freeze-frame clips are reported instead of silently playing forward.
 
 # Misc.
