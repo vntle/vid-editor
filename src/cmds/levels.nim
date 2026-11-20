@@ -277,14 +277,31 @@ proc main*(strArgs: seq[string]) =
     let (ret, values) = subtitle(container, tb, regPattern, parsedMethod.stream.int16)
     if ret != -1:
       error &"Subtitle stream out of range: {ret}"
+    # One echo for the whole list: echo flushes stdout on every call, which
+    # was a write syscall per frame.
+    var buf = newStringOfCap(values.len * 2)
     for value in values:
-      echo (if value: "1" else: "0")
+      if buf.len > 0: buf.add '\n'
+      buf.add(if value: '1' else: '0')
+    if values.len > 0: echo buf
     return
 
   let (data, errs) = computeLevels(job)
-  for u in data:
-    if display == "d16": echo uint16(u) else: echo u
-  echo ""
+  var buf = newStringOfCap(data.len * 8)
+  if display == "d16":
+    for u in data:
+      buf.add $uint16(u)
+      buf.add '\n'
+  else:
+    # Formatting a Unorm16 takes several small allocations, and a video's
+    # levels repeat a lot, so format each of the 65536 values at most once.
+    var text = newSeq[string](65536)
+    for u in data:
+      let k = uint16(u).int
+      if text[k].len == 0: text[k] = $u
+      buf.add text[k]
+      buf.add '\n'
+  echo buf # its own newline is the blank line that ends the list
 
   if errs > 0:
     error &"Could not decode {errs} packet(s); levels are incomplete."
