@@ -330,8 +330,20 @@ proc reformat*(frame: ptr AVFrame, format: AVPixelFormat, width: cint = 0,
 
   return newFrame
 
-proc toImg(frame: ptr AVFrame): Img =
-  let rgb = frame.reformat(AV_PIX_FMT_RGB24)
+proc reusedSws(ctx: var ptr SwsContext): ptr SwsContext =
+  ## `ctx`, allocated on first use. swscale rebuilds it by itself when the
+  ## frames' sizes, formats or color tags change, so a caller that converts
+  ## every frame keeps one and builds the filters and threads once.
+  if ctx == nil:
+    ctx = sws_alloc_context()
+    if ctx == nil:
+      error "Failed to allocate sws context"
+    # sws_alloc_context defaults to a single thread.
+    discard av_opt_set_int(ctx, "threads", 0, 0)
+  ctx
+
+proc toImg(frame: ptr AVFrame, ctx: ptr SwsContext = nil): Img =
+  let rgb = frame.reformat(AV_PIX_FMT_RGB24, ctx = ctx)
   result = Img(w: rgb.width.int, h: rgb.height.int)
   result.px = newSeq[uint8](result.w * result.h * 3)
   for y in 0 ..< result.h:
@@ -341,7 +353,7 @@ proc toImg(frame: ptr AVFrame): Img =
     var f = rgb
     av_frame_free(addr f)
 
-proc fromImg(im: Img, like: ptr AVFrame): ptr AVFrame =
+proc fromImg(im: Img, like: ptr AVFrame, ctx: ptr SwsContext = nil): ptr AVFrame =
   ## `im` in the format and color tags of `like`, so the round trip through
   ## RGB uses the same matrix both ways.
   var rgb = av_frame_alloc()
@@ -370,11 +382,10 @@ proc fromImg(im: Img, like: ptr AVFrame): ptr AVFrame =
   result.color_primaries = like.color_primaries
   result.color_trc = like.color_trc
   if av_frame_get_buffer(result, 32) < 0: error "Could not allocate a transition frame"
-  var ctx = sws_alloc_context()
-  if ctx == nil: error "Failed to allocate sws context"
-  discard av_opt_set_int(ctx, "threads", 0, 0)
-  let ret = sws_scale_frame(ctx, result, rgb)
-  sws_free_context(addr ctx)
+  var ownedCtx: ptr SwsContext = nil
+  let swsCtx = (if ctx != nil: ctx else: reusedSws(ownedCtx))
+  let ret = sws_scale_frame(swsCtx, result, rgb)
+  sws_free_context(addr ownedCtx)
   av_frame_free(addr rgb)
   if ret < 0: error "Failed to convert a transition frame"
 
@@ -801,7 +812,7 @@ proc drawConfetti(frame: ptr AVFrame, act: Action, local: int, fps: float) =
     fillChip(frame, poly, color)
 
 proc scaleWithPad(src: ptr AVFrame, targetW, targetH: int32,
-    bg: RGBColor, tag: YuvTag): ptr AVFrame =
+    bg: RGBColor, tag: YuvTag, ctx: ptr SwsContext = nil): ptr AVFrame =
   ## Scale src to fit within targetW x targetH preserving aspect ratio,
   ## centering with bg color padding. Returns a new YUV420P frame.
   ## Uses sws_scale_frame + manual pixel copy to avoid filter graph NEON
@@ -841,14 +852,17 @@ proc scaleWithPad(src: ptr AVFrame, targetW, targetH: int32,
   # Propagate interlaced flags so sws_frame_setup doesn't reject mismatched frames.
   # AV_FRAME_FLAG_INTERLACED = 1<<3, AV_FRAME_FLAG_TOP_FIELD_FIRST = 1<<4
   scaled.flags = src.flags and (8 or 16).cint
-  var swsCtx = sws_alloc_context()
+  var swsCtx = ctx
   if swsCtx == nil:
-    av_frame_free(addr scaled)
-    av_frame_free(addr output)
-    error "Could not allocate sws context in scaleWithPad"
-  discard av_opt_set_int(swsCtx, "threads", 0, 0)
+    swsCtx = sws_alloc_context()
+    if swsCtx == nil:
+      av_frame_free(addr scaled)
+      av_frame_free(addr output)
+      error "Could not allocate sws context in scaleWithPad"
+    discard av_opt_set_int(swsCtx, "threads", 0, 0)
   let scaleRet = sws_scale_frame(swsCtx, scaled, src)
-  sws_free_context(addr swsCtx)
+  if ctx == nil:
+    sws_free_context(addr swsCtx)
   if scaleRet < 0:
     av_frame_free(addr scaled)
     av_frame_free(addr output)
@@ -1159,6 +1173,9 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
   # Allocated on the first zoom; swscale rebuilds it itself when the geometry
   # changes, so a constant zoom pays the init cost once.
   var zoomCtx: ptr SwsContext = nil
+  # The same for fitting a source of another size to the canvas, and for a
+  # transition's trip through RGB: both run on every frame they cover.
+  var padCtx, toRgbCtx, fromRgbCtx: ptr SwsContext = nil
 
   var framesSaved = 0
   var frameNo = -1'i64 # the timeline frame being built
@@ -2049,7 +2066,8 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
     var (acc, didDecode) = decodeClipFrame(o)
     if didDecode and (acc.width.int32, acc.height.int32) != tl.res:
       let oldAcc = acc
-      acc = scaleWithPad(acc, tl.res[0], tl.res[1], tl.bg, solidTag)
+      acc = scaleWithPad(acc, tl.res[0], tl.res[1], tl.bg, solidTag,
+        reusedSws(padCtx))
       av_frame_free(addr oldAcc)
     if acc != nil and acc.width > 0 and acc.height > 0:
       acc = applyEffects(acc, o.effects, o.local, o.dur, src = o.src,
@@ -2270,9 +2288,10 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
           let seed = uint32(w.start and 0xffffffff) xor (uint32(o.layer) * 2654435761'u32)
           let dip: tuple[r, g, b: float32] = (tl.bg.red.float32, tl.bg.green.float32,
             tl.bg.blue.float32)
-          let img = render(w.kind, fromF.toImg, toF.toImg, below.toImg, p,
-            local.int, w.dur.int, seed, dip)
-          acc = img.fromImg(fromF)
+          let rgbCtx = reusedSws(toRgbCtx)
+          let img = render(w.kind, fromF.toImg(rgbCtx), toF.toImg(rgbCtx),
+            below.toImg(rgbCtx), p, local.int, w.dur.int, seed, dip)
+          acc = img.fromImg(fromF, reusedSws(fromRgbCtx))
           av_frame_free(addr fromF)
           av_frame_free(addr toF)
           var b = below
@@ -2320,7 +2339,8 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
           # costs one sws_scale rather than one per decoded frame).
           if (frame.width.int32, frame.height.int32) != tl.res:
             let oldFrame = frame
-            frame = scaleWithPad(frame, tl.res[0], tl.res[1], tl.bg, solidTag)
+            frame = scaleWithPad(frame, tl.res[0], tl.res[1], tl.bg, solidTag,
+              reusedSws(padCtx))
             av_frame_free(addr oldFrame)
         else:
           # No new frame decoded: keep the pre-initialized `frame` (nullFrame, or
@@ -2357,6 +2377,9 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
     sws_free_context(addr scaleCtx)
     sws_free_context(addr reformatCtx)
     sws_free_context(addr zoomCtx)
+    sws_free_context(addr padCtx)
+    sws_free_context(addr toRgbCtx)
+    sws_free_context(addr fromRgbCtx)
     av_frame_free(addr frame)
     av_frame_free(addr lastProcessedFrame)
     av_frame_free(addr nullFrame)
