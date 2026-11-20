@@ -256,6 +256,15 @@ when not defined(emscripten):
 
     return location
 
+proc similarFileHint(path: string): string =
+  ## "Did you mean" for an input that isn't there, from the names beside it,
+  ## so a typo is caught before any analysis starts.
+  let dir = agSplitFile(path).dir
+  var names: seq[string]
+  for entry in walkDir(if dir == "": "." else: dir, relative = true):
+    names.add entry.path
+  didYouMean(extractFilename(path), names)
+
 proc listAvailableFilters(): string =
   result = "Filters:"
   var opaque: pointer = nil
@@ -699,8 +708,13 @@ judge making cuts.
       if myInput.startsWith("-"):
         if i >= positionalStart:
           error &"Input file doesn't exist: {myInput}"
-        error &"Option/Input file doesn't exist: {myInput}"
+        # A single-dash typo like `-margin` lands here, not at "Unknown option".
+        error &"Option/Input file doesn't exist: {myInput}{optionDidYouMean(myInput, mainOptions)}"
       error &"Input file must have an extension: {myInput}"
+    elif "://" notin myInput and not fileExists(myInput) and not dirExists(myInput):
+      # Checked here, not at open, so a timeline file (.v3, .xml) that isn't
+      # there gets this message too, instead of an uncaught IOError.
+      error &"Input file doesn't exist: {myInput}{similarFileHint(myInput)}"
 
   editMedia(args, video, audio)
 
