@@ -482,7 +482,7 @@ proc runFilterChain(data: seq[int16], acts: seq[Action], sourceSr: cint,
   ## `rampTempo`, when given, is a tempo for each block of `rampBlock` input
   ## samples, which the chain's last stretch follows.
   let channels = layout.nb_channels
-  var processedData = data
+  var processedData: seq[int16] # always set from the filter's output below
 
   block:
     let samples = data.len div channels
@@ -1033,7 +1033,8 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
       var cursors = newSeq[int](tl.a.len)
 
       var acc: seq[int32] = @[] # interleaved accumulator over [bufStart, ...)
-      var bufStart = fromSample # output sample-frame index mapped to acc[0]
+      var accOff = 0 # acc[accOff] is sample-frame bufStart; before it is sent
+      var bufStart = fromSample # output sample-frame index mapped to acc[accOff]
 
       template startOf(li: int): int =
         int(tl.a[li][cursors[li]].start * sr.int64 * tb.den div tb.num)
@@ -1042,8 +1043,8 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
       # (the whole remainder when `final`), then drop them from `acc`.
       template flushUpTo(boundaryArg: int, final: bool) =
         let boundary = min(boundaryArg, totalSamples)
-        if (boundary - bufStart) * targetChannels > acc.len:
-          acc.setLen((boundary - bufStart) * targetChannels)
+        if accOff + (boundary - bufStart) * targetChannels > acc.len:
+          acc.setLen(accOff + (boundary - bufStart) * targetChannels)
         var emitFrames = 0
         if final:
           emitFrames = max(0, boundary - bufStart)
@@ -1055,15 +1056,21 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
           let cf = min(frameSize, emitFrames - off)
           var chunk = newSeq[int16](cf * targetChannels)
           for k in 0 ..< cf * targetChannels:
-            chunk[k] = clamp16(acc[off * targetChannels + k])
+            chunk[k] = clamp16(acc[accOff + off * targetChannels + k])
           off += cf
           yield chunk
         if emitFrames > 0:
-          acc =
-            if emitFrames * targetChannels < acc.len:
-              acc[emitFrames * targetChannels .. ^1]
-            else: @[]
+          accOff += emitFrames * targetChannels
           bufStart += emitFrames
+          # Move the unsent rest down only once the sent part is at least half
+          # of `acc`: a long clip (a music `add:` layer) under many short ones
+          # used to be copied whole after every one of them.
+          if accOff * 2 >= acc.len:
+            let keep = acc.len - accOff
+            if keep > 0:
+              moveMem(addr acc[0], addr acc[accOff], keep * sizeof(int32))
+            acc.setLen(keep)
+            accOff = 0
 
       # Clips over before the start are never read.
       for li in activeLayers:
@@ -1115,8 +1122,8 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
                     targetChannels)
                 break
           let neededFrames = startSample + n - bufStart
-          if neededFrames * targetChannels > acc.len:
-            acc.setLen(neededFrames * targetChannels)
+          if accOff + neededFrames * targetChannels > acc.len:
+            acc.setLen(accOff + neededFrames * targetChannels)
           for i in 0 ..< n:
             let outputSampleIndex = startSample + i
             # A clip running into the start contributes from there on.
@@ -1133,13 +1140,21 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
                 else: 1.0'f32
               )
               let gain = min(1.0'f32, min(fadeIn, fadeOut))
-              let baseIndex = (outputSampleIndex - bufStart) * targetChannels
+              let baseIndex = accOff + (outputSampleIndex - bufStart) * targetChannels
               let dg = (if duckEnv.len > 0: duckEnv[i] else: 1.0'f32)
-              for ch in 0 ..< min(targetChannels, sourceChannels):
-                let sourceIndex = i * sourceChannels + ch
-                if sourceIndex < processedData.len:
-                  acc[baseIndex + ch] += int32(round(processedData[
-                      sourceIndex].float32 * gain * dg))
+              if gain == 1.0'f32 and dg == 1.0'f32:
+                # Outside fades and ducks, skip the per-sample round() call;
+                # an int16 times 1.0 rounds to itself.
+                for ch in 0 ..< min(targetChannels, sourceChannels):
+                  let sourceIndex = i * sourceChannels + ch
+                  if sourceIndex < processedData.len:
+                    acc[baseIndex + ch] += int32(processedData[sourceIndex])
+              else:
+                for ch in 0 ..< min(targetChannels, sourceChannels):
+                  let sourceIndex = i * sourceChannels + ch
+                  if sourceIndex < processedData.len:
+                    acc[baseIndex + ch] += int32(round(processedData[
+                        sourceIndex].float32 * gain * dg))
 
         # Everything below the next clip's start can receive no further writes.
         var hasRemaining = false
@@ -1231,14 +1246,15 @@ proc makeAudioFrames*(fmt: AVSampleFormat, tl: v3, frameSize: int, layerIndices:
       # Pass 1: stream the timeline to find the global peak.
       var maxPeakLevel = -99.0'f32
       block:
+        # log10 rises with its input, so take it once, of the largest sample,
+        # rather than for every sample.
+        var maxAbs = 0'i32
         let produce = newTimelineProducer()
         for chunk in produce():
           for s in chunk:
-            let amplitude = abs(s.float32 / 32768.0)
-            if amplitude > 0.0:
-              let peakLevel = 20.0 * log10(amplitude)
-              if peakLevel > maxPeakLevel:
-                maxPeakLevel = peakLevel
+            maxAbs = max(maxAbs, abs(s.int32))
+        if maxAbs > 0:
+          maxPeakLevel = 20.0 * log10(maxAbs.float32 / 32768.0)
       let peakAdjustment = norm.t - maxPeakLevel
       debug &"current peak level: {maxPeakLevel}"
       debug &"peak adjustment: {peakAdjustment:.3f}dB"
