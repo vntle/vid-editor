@@ -256,6 +256,26 @@ when not defined(emscripten):
 
     return location
 
+func isPlainPath(input: string): bool =
+  ## Whether `input` names one file, not an FFmpeg protocol (`concat:a|b`,
+  ## `file:x`, `rtmp://`) or an image sequence (`img%03d.png`). A drive
+  ## letter (`C:`) or a colon after a path separator is still a path.
+  if '%' in input: return false
+  let colon = input.find(':')
+  if colon < 2: return true
+  for c in input[0 ..< colon]:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '+', '.', '-'}: return true
+  false
+
+proc pathExists(path: string): bool =
+  ## Anything there at all: a file, directory, FIFO or device.
+  if fileExists(path) or dirExists(path): return true
+  try:
+    discard getFileInfo(path)
+    true
+  except OSError:
+    false
+
 proc similarFileHint(path: string): string =
   ## "Did you mean" for an input that isn't there, from the names beside it,
   ## so a typo is caught before any analysis starts.
@@ -711,7 +731,7 @@ judge making cuts.
         # A single-dash typo like `-margin` lands here, not at "Unknown option".
         error &"Option/Input file doesn't exist: {myInput}{optionDidYouMean(myInput, mainOptions)}"
       error &"Input file must have an extension: {myInput}"
-    elif "://" notin myInput and not fileExists(myInput) and not dirExists(myInput):
+    elif isPlainPath(myInput) and not pathExists(myInput):
       # Checked here, not at open, so a timeline file (.v3, .xml) that isn't
       # there gets this message too, instead of an uncaught IOError.
       error &"Input file doesn't exist: {myInput}{similarFileHint(myInput)}"
