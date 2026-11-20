@@ -633,10 +633,12 @@ proc bakeTransitions*(source: v3): v3 =
       else:
         fadeOutStart = clipEnd
 
+      # Once per clip, not per part: a ramp's map takes 512 speed lookups.
+      let isRamp = initSpeedMap(tl.effects[original.effects]).ramp
       template addPart(lo, hi: int64, fadeIn, fadeOut: bool) =
         if hi > lo:
           var part = clip
-          if initSpeedMap(tl.effects[original.effects]).ramp:
+          if isRamp:
             part = tl.sliceClip(effectIndex, original, lo, hi)
           else:
             part.start = lo
