@@ -14,8 +14,12 @@
  - Rendering no longer slows down quadratically with the number of clips: 160,000 one-frame clips render in 1.6 seconds instead of 58.
  - Importing FCP7 XML uses about 10% less memory.
  - `blackdetect` is 3.2× faster and `motion` 1.6× faster. Both now read a frame's true luma instead of a gray recomputed through RGB, so `motion` values run about 8% lower and `blackdetect` can shift a few frames at the end of a fade.
+ - `motion` is another 1.8× faster, 2.2× with a region (`x`, `y`, `w`, `h`), and 3.8× at `width=1280,blur=0`, with the same values. Its scale and blur no longer split each small frame across threads the decoder is already using, and `blur=0` skips the blur.
 
 ## Fixes
+ - A mistyped `-c:v`, `-c:a` or `-pix_fmt` is reported before analysis, not after it, with the encoder likely meant: `hevc` for `h265`, `libx264` for `x264`.
+ - An unknown `--export`, `--audio-normalize`, `--edit` method or attribute lists the choices and suggests the closest one, such as `v1` for `--export json` and `threshold` for `audio:thresold=0.1`.
+ - `--resolution` takes `1920x1080` as well as `1920,1080`, and `--frame-rate` takes `30fps`. A bad frame rate no longer prints FFmpeg's parser line before the error.
  - FCP7 XML import plays each audio track from the right stream of a multi-stream source, instead of the first stream for all of them, and keeps a mono source mono.
  - FCP7 XML import skips disabled clips, no longer turns Premiere's untouched opacity into an effect on every clip, and warns about the titles and nested sequences it leaves out. It is no longer experimental.
  - FCP7 XML export writes Premiere's exact source times (`pproTicksIn`/`pproTicksOut`), and import reads them, so clips at fractional speeds keep their in points. Reversed and freeze-frame clips are reported instead of silently playing forward.
