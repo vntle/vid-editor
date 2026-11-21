@@ -77,6 +77,10 @@ proc createFilterGraph(timeBase: AVRational, pixFmtName: string,
 
   if filterGraph == nil:
     error "Could not allocate filter graph"
+  # The decoder already keeps every core busy. Slice threads on top only add
+  # handoffs, which cost more than gblur and scale save on these small frames.
+  # Set before the first filter, so the graph never starts its thread pool.
+  filterGraph.nb_threads = 1
 
   # Create buffer source with proper arguments
   let bufferArgs = cstring(
@@ -268,7 +272,10 @@ iterator motionness*(processor: var VideoProcessor, width, blur: int32,
     if currentFrame != nil:
       dealloc(currentFrame)
 
-  let filter = &"scale={width}:-1,format=gray,gblur=sigma={blur}"
+  # gblur at sigma 0 leaves every pixel as it is, but still costs most of a pass.
+  let filter =
+    if blur == 0: &"scale={width}:-1,format=gray"
+    else: &"scale={width}:-1,format=gray,gblur=sigma={blur}"
   let crop =
     if x != 0.0 or y != 0.0 or w != 1.0 or h != 1.0:
       # Crop before scaling so the analyzed region gets the full `width` resolution.
