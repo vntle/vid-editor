@@ -1,7 +1,7 @@
 import std/[math, strformat, strutils, sequtils, tables]
 
 import ./[ffmpeg, log]
-import ./util/[lang, rational]
+import ./util/[lang, rational, suggest]
 import ./lib/audioutil
 
 var useWebCodecs* = false
@@ -160,6 +160,27 @@ proc initCodec*(name: string): ptr AVCodec =
     if desc != nil:
       result = avcodec_find_encoder(desc.id)
 
+proc unknownEncoderHint*(name: string): string =
+  ## The encoder likely meant, if any, else where to see them all.
+  # What other tools call these. Edit distance would offer h264 for h265.
+  const aliases = [("h265", "hevc"), ("h.265", "hevc"), ("x265", "libx265"),
+    ("h.264", "h264"), ("avc", "h264"), ("x264", "libx264")]
+  for (alias, codec) in aliases:
+    if cmpIgnoreCase(name, alias) == 0 and initCodec(codec) != nil:
+      return &"\nDid you mean {codec}?"
+  var names: seq[string]
+  var opaque: pointer = nil
+  while true:
+    let c = av_codec_iterate(addr opaque)
+    if c == nil:
+      break
+    if av_codec_is_encoder(c) != 0:
+      names.add $c.name
+      names.add $avcodec_get_name(c.id)
+  result = didYouMean(name, names)
+  if result == "":
+    result = "\nSee the encoders an output can use with: auto-editor info -encoders mp4"
+
 proc initEnCtx(codec: ptr AVCodec): ptr AVCodecContext =
   let encoderCtx = avcodec_alloc_context3(codec)
   if encoderCtx == nil:
@@ -179,7 +200,7 @@ proc initEncoder*(id: AVCodecID): (ptr AVCodec, ptr AVCodecContext) =
 proc initEncoder*(name: string): (ptr AVCodec, ptr AVCodecContext) =
   let codec = initCodec(name)
   if codec == nil:
-    error "Unknown encoder: " & name
+    error "Unknown encoder: " & name & unknownEncoderHint(name)
   return (codec, initEnCtx(codec))
 
 proc findSoftwareDecoder(codecId: AVCodecID): ptr AVCodec =
@@ -550,7 +571,7 @@ width: cint = 640, height: cint = 480, layout: ref AVChannelLayout = nil): (
         ptr AVStream, ptr AVCodecContext) =
   let codec = initCodec(codecName)
   if codec == nil:
-    error "Encoder not found: " & codecName
+    error "Encoder not found: " & codecName & unknownEncoderHint(codecName)
   let format = self.formatCtx
 
   # Assert that this format supports the requested codec.

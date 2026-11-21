@@ -5,7 +5,7 @@ from std/math import round
 
 import ./[av, action, edit, ffmpeg, license, log, media, stats, timeline]
 import ./lib/editutil
-import ./util/[color, bar, fun, lang, rules, rational]
+import ./util/[color, bar, fun, lang, rules, rational, suggest]
 
 import ./imports/[fcp7, fcp11, json]
 import ./exports/[drops, fcp7, fcp11, json, shotcut, kdenlive, otio]
@@ -39,6 +39,23 @@ func prefixEquals(s, expected: string, stop: int): bool {.raises: [].} =
       return false
   true
 
+func unknownExportHint(name: string): string {.raises: [].} =
+  ## The kind likely meant, if any, then every kind there is.
+  # Other names for these formats. Most are too short for edit distance to
+  # tell apart from v1, v2 and v3, so look for them first.
+  const aliases = [("json", exV1), ("xml", exPremiere), ("fcp7", exPremiere),
+    ("fcpxml", exFinalCutPro), ("fcpx", exFinalCutPro), ("fcp", exFinalCutPro),
+    ("davinci", exResolve), ("mlt", exShotcut), ("otio", exPremiereOtio)]
+  var choices: seq[string]
+  for kind in exDefault .. ExportKind.high:
+    choices.add $kind
+  for (alias, kind) in aliases:
+    if cmpIgnoreCase(name, alias) == 0:
+      result = &"\nDid you mean {kind}?"
+  if result == "":
+    result = didYouMean(name, choices)
+  result &= "\nchoices are:\n  " & choices.join(", ")
+
 proc parseExportString*(exportStr: string): ExportSpec {.raises: [AutoEditorError].} =
   result.name = "Auto-Editor Media Group"
   result.version = 11
@@ -59,7 +76,9 @@ proc parseExportString*(exportStr: string): ExportSpec {.raises: [AutoEditorErro
     elif exportStr.prefixEquals("shotcut", kindEnd): exShotcut
     elif exportStr.prefixEquals("kdenlive", kindEnd): exKdenlive
     elif exportStr.prefixEquals("premiere-otio", kindEnd): exPremiereOtio
-    else: error &"Unknown export format: {exportStr[0 ..< kindEnd]}"
+    else:
+      let name = exportStr[0 ..< kindEnd]
+      error &"Unknown export format: {name}{unknownExportHint(name)}"
 
   if colonPos == -1:
     return

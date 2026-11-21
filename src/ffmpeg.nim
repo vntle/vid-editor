@@ -39,7 +39,9 @@ func toAVRational*(s: string): AVRational {.raises: [ValueError].} =
   if s.len == 0:
     raise newException(ValueError, "Empty string cannot be converted to AVRational")
 
-  let ret = av_parse_ratio(addr result, s.cstring, cint(high(cint)), 0, nil)
+  # The log offset lifts FFmpeg's own "Invalid chars" line past every log
+  # level, so only the message raised here is shown.
+  let ret = av_parse_ratio(addr result, s.cstring, cint(high(cint)), 1000, nil)
   if ret < 0:
     raise newException(ValueError, "Failed to rational: " & s)
   if result.den == 0:

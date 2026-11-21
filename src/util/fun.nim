@@ -261,7 +261,7 @@ proc parseBitrate*(input: string): int =
   if unit == "":
     return int(val)
 
-  error &"Unknown bitrate: {input}"
+  error &"Unknown bitrate: {input}\nUse bits per second, with k, M, or G for thousands, millions, or billions: 5M, 800k"
 
 proc parseTimeSimple*(val: string): PackedInt =
   const tb = 1000.0

@@ -225,7 +225,7 @@ Examples:
   OptDef(names: "-ar, --sample-rate", c: cTl, datum: coSampleRate, metavar: "NAT",
     help: "Set timeline sample rate"),
   OptDef(names: "-res, --resolution", c: cTl, datum: coResolution,
-    metavar: "WIDTH,HEIGHT", help: "Set timeline width and height"),
+    metavar: "WIDTH,HEIGHT", help: "Set timeline width and height, as 1920,1080 or 1920x1080"),
   OptDef(names: "-b, -bg, --background", c: cTl, datum: coBackground, metavar: "COLOR",
     help: "Set the background as a solid RGB color, or yuv#YYUUVV to fill YUV video with those 8-bit Y'CbCr values as they are"),
 

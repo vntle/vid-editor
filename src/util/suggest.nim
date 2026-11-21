@@ -16,6 +16,9 @@ func didYouMean*(input: string, choices: openArray[string]): string =
     if best == "" or bestDist == 0:
       return ""
 
+    # Within 3 edits, or a third of a long input, and never a word that's
+    # mostly different: "foo" is 2 edits from "or", but nothing like it.
     let limit = max(3, input.len div 3)
-    if bestDist <= limit: "\nDid you mean " & best & "?"
+    if bestDist <= limit and bestDist * 2 <= max(input.len, best.len):
+      "\nDid you mean " & best & "?"
     else: ""

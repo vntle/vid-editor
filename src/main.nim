@@ -13,8 +13,7 @@ when not defined(windows) and not defined(emscripten):
 import ./[about, action, cli, conductor, edit, ffmpeg, license, log]
 import render/burnsubs
 import ./lib/escape
-when defined(emscripten):
-  import ./av
+import ./av
 import cmds/[info, desc, cache, levels, subdump, whisper]
 import util/[color, fun, term, rational, suggest]
 
@@ -133,7 +132,9 @@ proc parseNum(val, opt: string): float64 =
     error &"--{opt} has unknown unit: {unit}"
 
 proc parseResolution(val, opt: string): (int32, int32) =
-  let vals = val.strip().split(",")
+  # Also take 1920x1080, the way sizes are usually written.
+  let sep = (if ',' notin val and 'x' in val: 'x' else: ',')
+  let vals = val.strip().split(sep)
   if len(vals) != 2:
     error &"'{val}': --{opt} takes two numbers"
 
@@ -160,7 +161,10 @@ proc parseSampleRate(val: string): cint =
     error "Samplerate must be positive"
 
 proc frameRateArg(val: string): AVRational =
-  result = (try: parseFrameRate(val) except ValueError as e: error e.msg)
+  # Also take 30fps, the way rates are usually written.
+  let rate = (if val.toLowerAscii.endsWith("fps"): val[0 ..< ^3].strip() else: val)
+  result = (try: parseFrameRate(rate) except ValueError as e:
+    error &"{e.msg}\nUse a number or ratio, like 30, 29.97, 30000/1001, or ntsc")
   if result == AVRational(num: 2997, den: 100):
     warning "29.97 is not the NTSC rate; use `-r ntsc` for 30000/1001"
   elif result == AVRational(num: 2997, den: 125) or
@@ -627,6 +631,15 @@ judge making cuts.
       echo "OS: ", plat.sysname, " ", plat.release, " ", plat.machine
     echo listAvailableFilters()
     quit(0)
+
+  # Encoders and pixel formats are otherwise first looked up at render time,
+  # after a download and the whole analysis.
+  when not defined(emscripten):
+    for name in [video.codec, audio.codec]:
+      if name != "auto" and initCodec(name) == nil:
+        error &"Unknown encoder: {name}{unknownEncoderHint(name)}"
+  if video.pixFmt != "" and av_get_pix_fmt(video.pixFmt.cstring) == AV_PIX_FMT_NONE:
+    error &"Unknown pixel format: {video.pixFmt}"
 
   # Fail fast on `add` (a CLI-only signal) before any expensive analysis.
   # Multiple inputs are handled later by the multi-source render/export policy
