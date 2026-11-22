@@ -329,26 +329,6 @@ proc scanVideoLength*(formatCtx: ptr AVFormatContext, video: ptr AVStream): AVRa
       den: video.avg_frame_rate.num)
   AVRational(num: 0, den: 1)
 
-proc mediaLength*(container: InputContainer): AVRational =
-  # Result is in seconds.
-  var formatCtx = container.formatContext
-  discard ffmpeg.av_seek_frame(formatCtx, -1, 0, AVSEEK_FLAG_BACKWARD)
-
-  if container.audio.len > 0:
-    let audio = container.audio[0]
-    return scanPackets(formatCtx, audio, 0).endPts * audio.time_base
-
-  if container.video.len > 0:
-    let video = container.video[0]
-    if not video.time_base.isValid:
-      return AVRational(num: 0, den: 1)
-    if video.duration != AV_NOPTS_VALUE:
-      return video.duration * video.time_base
-    # Matroska, WebP and AVIF give streams no duration of their own.
-    return scanVideoLength(formatCtx, video)
-
-  error "No audio or video stream found"
-
 proc setActiveStream*(container: InputContainer, index: cint) =
   ## Tell the demuxer to discard packets for every stream except `index`, so
   ## av_read_frame skips demuxing streams we don't decode (e.g. video while
@@ -361,6 +341,32 @@ proc setActiveStream*(container: InputContainer, index: cint) =
 proc resetDiscards*(container: InputContainer) =
   for i in 0 ..< container.formatContext.nb_streams.int:
     container.formatContext.streams[i].discardLevel = AVDISCARD_DEFAULT
+
+proc mediaLength*(container: InputContainer): AVRational =
+  # Result is in seconds.
+  var formatCtx = container.formatContext
+  discard ffmpeg.av_seek_frame(formatCtx, -1, 0, AVSEEK_FLAG_BACKWARD)
+
+  if container.audio.len > 0:
+    let audio = container.audio[0]
+    # Only the audio's packets count: let the demuxer skip the rest instead
+    # of reading every video frame off the disk.
+    container.setActiveStream(audio.index)
+    defer: container.resetDiscards()
+    return scanPackets(formatCtx, audio, 0).endPts * audio.time_base
+
+  if container.video.len > 0:
+    let video = container.video[0]
+    if not video.time_base.isValid:
+      return AVRational(num: 0, den: 1)
+    if video.duration != AV_NOPTS_VALUE:
+      return video.duration * video.time_base
+    # Matroska, WebP and AVIF give streams no duration of their own.
+    container.setActiveStream(video.index)
+    defer: container.resetDiscards()
+    return scanVideoLength(formatCtx, video)
+
+  error "No audio or video stream found"
 
 var decodeErrors*: int
 
