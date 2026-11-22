@@ -1,5 +1,6 @@
 import std/[heapqueue, options, sequtils, sets, strformat, strutils]
 from std/math import round
+from std/os import fileExists, sameFile
 
 import ../[action, av, ffmpeg, license, log, media, timeline, throttle]
 import ../util/[bar, rules, rational]
@@ -129,8 +130,26 @@ proc dropUndecodableAudio*(tl: var v3, cache: MediaCache) =
           $avcodec_get_name(codecId)
     layer = kept
 
+proc refuseToOverwriteSource(tl: v3, outputPath: string) =
+  ## A render reads its sources while it writes, so writing over one of them
+  ## truncates it first: `auto-editor talk.mp4 -o talk.mp4` would lose the
+  ## input and then fail to read it.
+  if not fileExists(outputPath):
+    return
+  var sources = tl.uniqueSources
+  for layer in tl.s:
+    for clip in layer:
+      if clip.src != nil: sources.incl clip.src
+  if tl.templateFile != nil:
+    sources.incl tl.templateFile
+  for src in sources:
+    if (try: sameFile(src[], outputPath) except OSError: false):
+      error &"The output would overwrite an input: {outputPath}. " &
+        "Name another file with -o."
+
 proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
     tl: var v3, outputPath: string, rules: Rules, bar: Bar, cache: MediaCache) =
+  tl.refuseToOverwriteSource(outputPath)
   var video = inputVideo
   # Before bakeTransitions: output streams are created from `tl` and their
   # frames come from the baked copy, so both must see the same audio layers.
