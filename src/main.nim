@@ -31,6 +31,19 @@ proc ctrlc() {.noconv.} =
 
 setControlCHook(ctrlc)
 
+when defined(linux) and not defined(emscripten) and sizeof(pointer) == 8:
+  proc mallopt(param, value: cint): cint {.importc, header: "<malloc.h>".}
+  var M_TRIM_THRESHOLD {.importc, header: "<malloc.h>", nodecl.}: cint
+  var M_MMAP_THRESHOLD {.importc, header: "<malloc.h>", nodecl.}: cint
+
+  # A smart render opens a new x264 for every stretch it re-encodes, and each
+  # one allocates and frees over a hundred megabytes of frames. By default glibc
+  # maps big blocks fresh and gives freed memory back to the system, so every
+  # encoder faulted its frames in page by page again: a third of the main
+  # thread's time on a 10-minute 720p edit. Keep freed memory for reuse.
+  discard mallopt(M_MMAP_THRESHOLD, 32 * 1024 * 1024) # glibc's largest
+  discard mallopt(M_TRIM_THRESHOLD, 256 * 1024 * 1024)
+
 when defined(debug) and not defined(emscripten) and not defined(windows):
   import std/[posix, strutils]
   proc sigsegvHandler(sig: cint) {.noconv.} =
