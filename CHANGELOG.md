@@ -20,6 +20,7 @@
 ## Fixes
  - FCP7 XML import plays each audio track from the right stream of a multi-stream source, instead of the first stream for all of them, and keeps a mono source mono.
  - FCP7 XML import skips disabled clips, no longer turns Premiere's untouched opacity into an effect on every clip, and warns about the titles and nested sequences it leaves out. It is no longer experimental.
+ - `-o out.m4a` (and `.m4b`) writes audio only, as with `.mp3` or `.wav`. FFmpeg's muxer for those extensions also writes `.m4v`, so an H.264 video track was being rendered into the audio file, which took 2.5× as long.
  - FCP7 XML export writes Premiere's exact source times (`pproTicksIn`/`pproTicksOut`), and import reads them, so clips at fractional speeds keep their in points. Reversed and freeze-frame clips are reported instead of silently playing forward.
 
 # Misc.

@@ -16,7 +16,7 @@ import ./lib/escape
 when defined(emscripten):
   import ./av
 import cmds/[info, desc, cache, levels, subdump, whisper]
-import util/[color, fun, term, rational, suggest]
+import util/[color, fun, rules, term, rational, suggest]
 
 import vendor/tinyre/tinyre
 
@@ -186,7 +186,7 @@ when not defined(emscripten):
     elif args.output notin ["", "-"]:
       let fmt = av_guess_format(nil, cstring(args.output), nil)
       if fmt != nil:
-        outV = not args.vn and fmt.video_codec notin [ID_NONE, ID_PNG]
+        outV = not args.vn and holdsVideo(args.output)
         outA = not args.an and fmt.audio_codec != ID_NONE
 
     result = (outV or editV, outA or editA)
