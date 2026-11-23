@@ -4,6 +4,8 @@ from std/math import round
 import ../[action, av, ffmpeg, license, log, media, timeline, throttle]
 import ../util/[bar, rules, rational]
 import ./[video, audio, subtitle, partialplan]
+when not defined(emscripten):
+  import ./encthread
 
 type Priority = object
   index: float64
@@ -295,6 +297,25 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
     for aEncCtx in audioEncoders:
       avcodec_free_context(addr aEncCtx)
 
+  # Each audio stream encodes on its own thread, overlapping the video work
+  # on this one. (The wasm build keeps to this thread: its pthread pool is
+  # sized for the decoders and encoders it already has.)
+  when not defined(emscripten):
+    var audioThreads: seq[EncoderThread]
+    for aEncCtx in audioEncoders:
+      audioThreads.add newEncoderThread(aEncCtx)
+    # Declared after the encoders' defer, so it runs first.
+    defer:
+      for t in audioThreads:
+        t.close()
+
+    template muxAudio(i: int, packets: untyped) =
+      for pkt in packets:
+        pkt.stream_index = audioStreams[i].index
+        av_packet_rescale_ts(pkt, audioEncoders[i].time_base,
+          audioStreams[i].time_base)
+        output.mux(pkt[])
+
   # Setup subtitle streams
   var subtitleStreams: seq[ptr AVStream] = @[]
   var subtitleSources: seq[string] = @[]
@@ -496,6 +517,17 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
         av_packet_free(addr ownedPacket)
         continue
       let frameType = outputStream.codecpar.codec_type
+      when not defined(emscripten):
+        if frameType == AVMEDIA_TYPE_AUDIO:
+          let i = audioStreams.find(outputStream)
+          if vOutStream == nil:
+            let time = frame.time(audioEncoders[i].time_base)
+            if time != -1.0:
+              bar.tick(round(time * tl.tb))
+              throttle.checkpoint(time)
+          audioThreads[i].submit(frame)
+          continue
+
       let encCtx =
         if frameType == AVMEDIA_TYPE_VIDEO:
           vEncCtx
@@ -525,6 +557,10 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
       if frameType == AVMEDIA_TYPE_AUDIO:
         av_frame_free(addr frame)
 
+    when not defined(emscripten):
+      for i in 0 ..< audioThreads.len:
+        muxAudio(i, audioThreads[i].ready)
+
   bar.`end`()
 
   # Flush streams
@@ -535,12 +571,16 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
       output.mux(outPacket[])
       av_packet_unref(outPacket)
 
-  for i, aEncCtx in audioEncoders:
-    for outPacket in aEncCtx.encode(nil, outPacket):
-      outPacket.stream_index = audioStreams[i].index
-      av_packet_rescale_ts(outPacket, aEncCtx.time_base, audioStreams[i].time_base)
-      output.mux(outPacket[])
-      av_packet_unref(outPacket)
+  when not defined(emscripten):
+    for i in 0 ..< audioThreads.len:
+      muxAudio(i, audioThreads[i].finish)
+  else:
+    for i, aEncCtx in audioEncoders:
+      for outPacket in aEncCtx.encode(nil, outPacket):
+        outPacket.stream_index = audioStreams[i].index
+        av_packet_rescale_ts(outPacket, aEncCtx.time_base, audioStreams[i].time_base)
+        output.mux(outPacket[])
+        av_packet_unref(outPacket)
 
   # Copy embedded images
   for (outStream, cachedPkt) in imageStreams:
