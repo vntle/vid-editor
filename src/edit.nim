@@ -1,8 +1,8 @@
 import std/[math, options, os, sequtils, strformat, strutils]
-import ./[av, editexpr, editlexer, editparse, ffmpeg, log]
+import ./[av, editexpr, editlexer, editmethods, editparse, ffmpeg, log]
 import ./analyze/[audio, blackdetect, motion, subtitle]
 import ./lib/[audioutil, dnorm16]
-import ./util/[bar, fun, rational]
+import ./util/[bar, fun, rational, suggest]
 
 import ./vendor/tinyre/tinyre
 
@@ -300,7 +300,11 @@ proc parseEdit*(source: string, filename = "--edit"): EditExpr =
     of esNone: return edit(noneMethod())
     of esAll: return edit(allMethod())
     else:
-      error &"Unknown function: {text[node[0].`from` ..< node[0].to]}"
+      let name = text[node[0].`from` ..< node[0].to]
+      var known = @["none", "all"]
+      for d in editMethodDefs: known.add d.names
+      for o in editOperatorDefs: known.add o.name
+      error &"Unknown function: {name}{didYouMean(name, known)}"
 
   var lexer = initLexer(filename, source)
   var parser: Parser

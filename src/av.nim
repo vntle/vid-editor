@@ -1,7 +1,7 @@
 import std/[math, strformat, strutils, sequtils, tables]
 
 import ./[ffmpeg, log]
-import ./util/[lang, rational]
+import ./util/[lang, rational, suggest]
 import ./lib/audioutil
 
 var useWebCodecs* = false
@@ -150,9 +150,20 @@ proc resolveEncoderContext*(ctx: var ptr AVCodecContext) =
     avcodec_free_context(addr ctx)
     ctx = replacement
 
+const codecAliases = [
+  # Names people know a codec or encoder by that FFmpeg doesn't.
+  ("opus", "libopus"), ("h265", "hevc"), ("x264", "libx264"),
+  ("x265", "libx265"),
+]
+
+const wellKnownEncoders* = ["h264", "hevc", "av1", "vp9", "vp8", "prores",
+  "dnxhd", "mpeg4", "libx264", "libx265", "libsvtav1", "libvpx-vp9", "aac",
+  "opus", "libopus", "flac", "mp3", "libmp3lame", "alac", "pcm_s16le"]
+
 proc initCodec*(name: string): ptr AVCodec =
-  if name == "opus":
-    return avcodec_find_encoder_by_name("libopus")
+  for (alias, real) in codecAliases:
+    if name == alias:
+      return initCodec(real)
 
   result = avcodec_find_encoder_by_name(name.cstring)
   if result == nil:
@@ -550,7 +561,8 @@ width: cint = 640, height: cint = 480, layout: ref AVChannelLayout = nil): (
         ptr AVStream, ptr AVCodecContext) =
   let codec = initCodec(codecName)
   if codec == nil:
-    error "Encoder not found: " & codecName
+    error "Encoder not found: " & codecName &
+      didYouMean(codecName, wellKnownEncoders)
   let format = self.formatCtx
 
   # Assert that this format supports the requested codec.

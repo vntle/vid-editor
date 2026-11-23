@@ -1,6 +1,7 @@
 import std/strutils
 
 import ./[editlexer, editmethods]
+import ./util/suggest
 
 type
   BoundEditArg* = tuple[position: int, value: string]
@@ -33,7 +34,7 @@ proc bindEditArgs*(expressions: openArray[Expr], text: string,
       if position == -1:
         let key = node[1].atomText(text)
         raise newException(ValueError,
-          "got an unexpected keyword argument: " & key)
+          "got an unexpected keyword argument: " & key & didYouMean(key, argOrder))
       value = node[2].atomText(text)
     else:
       if sawKeyword:

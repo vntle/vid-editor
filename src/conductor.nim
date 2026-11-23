@@ -5,7 +5,7 @@ from std/math import round
 
 import ./[av, action, edit, ffmpeg, license, log, media, stats, timeline]
 import ./lib/editutil
-import ./util/[color, bar, fun, lang, rules, rational]
+import ./util/[color, bar, fun, lang, rules, rational, suggest]
 
 import ./imports/[fcp7, fcp11, json]
 import ./exports/[drops, fcp7, fcp11, json, shotcut, kdenlive, otio]
@@ -59,7 +59,11 @@ proc parseExportString*(exportStr: string): ExportSpec {.raises: [AutoEditorErro
     elif exportStr.prefixEquals("shotcut", kindEnd): exShotcut
     elif exportStr.prefixEquals("kdenlive", kindEnd): exKdenlive
     elif exportStr.prefixEquals("premiere-otio", kindEnd): exPremiereOtio
-    else: error &"Unknown export format: {exportStr[0 ..< kindEnd]}"
+    else:
+      let kind = exportStr[0 ..< kindEnd]
+      error &"Unknown export format: {kind}" & didYouMean(kind, ["default",
+        "clip-sequence", "v1", "v2", "v3", "premiere", "resolve-fcp7",
+        "final-cut-pro", "resolve", "shotcut", "kdenlive", "premiere-otio"])
 
   if colonPos == -1:
     return
@@ -162,7 +166,10 @@ proc exportExt(ext: string, myExport: ExportKind, hasVideo: bool): string =
     of exV2: ".v2"
     of exV3: ".v3"
     of exDefault:
-      if hasVideo and not holdsVideo("x" & ext): ".mp4" else: ext
+      # An extension no muxer knows stays, for initRules to name the problem.
+      if hasVideo and av_guess_format(nil, cstring("x" & ext), nil) != nil and
+          not holdsVideo("x" & ext): ".mp4"
+      else: ext
     else: ext
 
 proc setOutput(userOut: string, `export`: ExportKind, path: string,
