@@ -343,6 +343,9 @@ proc evalEdit(e: EditExpr, container: InputContainer, input: string,
         let audioStream = container.audio[i]
         resolveAudioChannelOrDefault(addr audioStream.codecpar.ch_layout, m.channel)
 
+      if container.audio.len == 0:
+        error "audio: this file has no audio to analyze. Try --edit motion " &
+          "to cut where nothing moves, or --edit none to keep everything."
       if m.stream == -1:
         var matched = false
         var undecodable = 0
