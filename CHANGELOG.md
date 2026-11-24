@@ -14,6 +14,7 @@
  - Rendering no longer slows down quadratically with the number of clips: 160,000 one-frame clips render in 1.6 seconds instead of 58.
  - Importing FCP7 XML uses about 10% less memory.
  - `blackdetect` is 3.2× faster and `motion` 1.6× faster. Both now read a frame's true luma instead of a gray recomputed through RGB, so `motion` values run about 8% lower and `blackdetect` can shift a few frames at the end of a fade.
+ - Audio encodes on a thread of its own, alongside the video instead of between its frames, and keeps up with it rather than trailing it. Cutting the silence out of a 10-minute 720p video renders 1.5× faster (19.5 seconds to 12.8), the same video with two audio tracks 2.1× faster, and a full re-encode 1.2× faster. The output is unchanged, byte for byte.
 
 ## Fixes
  - FCP7 XML import plays each audio track from the right stream of a multi-stream source, instead of the first stream for all of them, and keeps a mono source mono.

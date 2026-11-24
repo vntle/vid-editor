@@ -1,17 +1,28 @@
 import std/[heapqueue, options, sequtils, sets, strformat, strutils]
-from std/math import round
+from std/math import ceil, round
 
 import ../[action, av, ffmpeg, license, log, media, timeline, throttle]
 import ../util/[bar, rules, rational]
 import ./[video, audio, subtitle, partialplan]
+when not defined(emscripten):
+  import ./encthread
+
+# Audio encoders run on threads of their own, overlapping the video side.
+# WebAssembly builds keep them on the render loop: their encoders can be
+# WebCodecs ones, which belong to the thread that made them.
+const audioEncoderThreads = not defined(emscripten)
+const audioAheadSecs = 6.0 # how far audio may run ahead of video
+const audioQueueSecs = 8.0 # how much of it may wait for its encoder
 
 type Priority = object
   index: float64
+  order: int64 # push order, to break ties
   frame: ptr AVFrame
   packet: ptr AVPacket
   stream: ptr AVStream
 
-func `<`(a, b: Priority): bool = a.index < b.index
+func `<`(a, b: Priority): bool =
+  a.index < b.index or (a.index == b.index and a.order < b.order)
 
 func pngDimensions(data: ptr uint8, size: cint): (cint, cint) =
   const sig = [0x89'u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
@@ -384,6 +395,33 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
 
   output.startEncoding()
 
+  when audioEncoderThreads:
+    # Declared after the encoders' own `defer`, so this one runs first: each
+    # thread stops before its codec context is freed.
+    var audioThreads: seq[EncoderThread] = @[]
+    defer:
+      for t in audioThreads:
+        t.close()
+    for aEncCtx in audioEncoders:
+      # Room for more than `maxAudioAhead`, below, so the loop doesn't wait on
+      # an encoder before it's that far ahead.
+      let frameSize = if aEncCtx.frame_size > 0: aEncCtx.frame_size else: 1024
+      let capacity = int(ceil(audioQueueSecs * aEncCtx.sample_rate.float64 /
+        frameSize.float64))
+      audioThreads.add newEncoderThread(aEncCtx, capacity)
+
+  # Hand an encoded audio packet of stream `i` to the muxer.
+  template muxAudio(i: int, pkt: ptr AVPacket) =
+    let aEncCtx = audioEncoders[i]
+    pkt.stream_index = audioStreams[i].index
+    if vOutStream == nil and pkt.pts != AV_NOPTS_VALUE:
+      let time = float(pkt.pts) * float(aEncCtx.time_base)
+      if time >= 0:
+        bar.tick(round(time * tl.tb))
+        throttle.checkpoint(time)
+    av_packet_rescale_ts(pkt, aEncCtx.time_base, audioStreams[i].time_base)
+    output.mux(pkt[])
+
   var title = &"({output.formatCtx.oformat.name}) "
   var encoderTitles: seq[string] = @[]
 
@@ -405,33 +443,34 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
     title &= encoderTitles.join("\e[0m+") & "\e[0m"
   bar.start(tl.len.float64, title)
 
-  var shouldGetAudio: seq[bool] = newSeq[bool](audioFrameIters.len)
-  const MAX_AUDIO_AHEAD = 30 # In timebase, how far audio can be ahead of video.
+  # How far, in timebase, audio is let run ahead of video. Seconds of it keep
+  # an audio encoder on its own thread busy across the stretches where video
+  # is slow to come by (re-encoded GOPs) and where it's quick (copied ones);
+  # the muxer still interleaves the two closely.
+  let maxAudioAhead =
+    when audioEncoderThreads:
+      max(30'i64, int64(round(audioAheadSecs * tl.tb.float64)))
+    else: 30'i64
 
   # Priority queue for ordered frames by time_base.
   var frameQueue = initHeapQueue[Priority]()
+  var pushed = 0'i64
+  template enqueue(item: Priority) =
+    var it = item
+    it.order = pushed # keeps a stream's frames in order when indexes tie
+    inc pushed
+    frameQueue.push(it)
+
   var earliestVideoIndex = none(int64)
-  var latestAudioIndices: seq[float64] = @[]
+  var latestAudioIndices = newSeq[int64](audioFrameIters.len)
   for i in 0..<audioFrameIters.len:
-    latestAudioIndices.add(-Inf)
+    latestAudioIndices[i] = int64.low
 
   var videoFrame: ptr AVFrame
   var videoPacket: ptr AVPacket
-  var audioFrames: seq[ptr AVFrame] = newSeq[ptr AVFrame](audioFrameIters.len)
   var index: int64
 
   while true:
-    if not earliestVideoIndex.isSome:
-      for i in 0..<shouldGetAudio.len:
-        shouldGetAudio[i] = true
-    else:
-      for i in 0..<shouldGetAudio.len:
-        for item in frameQueue:
-          if item.stream == audioStreams[i]:
-            latestAudioIndices[i] = max(latestAudioIndices[i], item.index.float64)
-        shouldGetAudio[i] = (latestAudioIndices[i] <= float(earliestVideoIndex.get() +
-            MAX_AUDIO_AHEAD))
-
     if partialLosslessVideo:
       videoFrame = nil
       if finished(videoPacketIter):
@@ -440,7 +479,7 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
         (videoPacket, index) = videoPacketIter()
         if videoPacket != nil:
           earliestVideoIndex = some(index)
-          frameQueue.push(Priority(index: float(index), packet: videoPacket,
+          enqueue(Priority(index: float(index), packet: videoPacket,
             stream: vOutStream))
     else:
       videoPacket = nil
@@ -450,36 +489,34 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
         (videoFrame, index) = videoFrameIter()
         if videoFrame != nil:
           earliestVideoIndex = some(index)
-          frameQueue.push(Priority(index: float(index), frame: videoFrame,
+          enqueue(Priority(index: float(index), frame: videoFrame,
             stream: vOutStream))
 
-    for i in 0..<audioFrameIters.len:
-      if finished(audioFrameIters[i]):
-        audioFrames[i] = nil
-      elif shouldGetAudio[i]:
-        (audioFrames[i], _) = audioFrameIters[i]()
-        if audioFrames[i] != nil:
-          let audioIndex = int(round(
-            audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
-          # Update index to the maximum of video and audio indices to ensure progress
-          index = max(index, audioIndex)
-
-    # Break if no more frames
     var hasFrames = videoFrame != nil or videoPacket != nil
-    for audioFrame in audioFrames:
-      if audioFrame != nil:
+    # Bring each audio stream up to the video, which a frame of each per loop
+    # wouldn't do: there are more audio frames a second than video ones. With
+    # no video left, take one a loop.
+    let keepUp = hasFrames and earliestVideoIndex.isSome
+    for i in 0..<audioFrameIters.len:
+      while not finished(audioFrameIters[i]):
+        if keepUp and latestAudioIndices[i] > earliestVideoIndex.get() + maxAudioAhead:
+          break
+        let (audioFrame, _) = audioFrameIters[i]()
+        if audioFrame == nil:
+          break
         hasFrames = true
-        break
+        let audioIndex = int64(round(
+          audioFrame.time(audioEncoders[i].time_base) * tl.tb))
+        latestAudioIndices[i] = audioIndex
+        # Update index to the maximum of video and audio indices to ensure progress
+        index = max(index, audioIndex)
+        enqueue(Priority(index: float(audioIndex), frame: audioFrame,
+          stream: audioStreams[i]))
+        if not keepUp:
+          break
+
     if not hasFrames:
       break
-
-    # Add audio frames to queue
-    for i in 0..<audioFrameIters.len:
-      if shouldGetAudio[i] and audioFrames[i] != nil:
-        let audioIndex = int(round(
-          audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
-        frameQueue.push(Priority(index: float(audioIndex), frame: audioFrames[i],
-            stream: audioStreams[i]))
 
     while frameQueue.len > 0 and frameQueue[0].index <= float64(index):
       let item = frameQueue.pop()
@@ -496,16 +533,19 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
         av_packet_free(addr ownedPacket)
         continue
       let frameType = outputStream.codecpar.codec_type
+      var audioIndex = -1
+      if frameType != AVMEDIA_TYPE_VIDEO:
+        for i, stream in audioStreams:
+          if stream == outputStream:
+            audioIndex = i
+            break
+      when audioEncoderThreads:
+        if audioIndex >= 0:
+          audioThreads[audioIndex].submit(frame) # the thread frees it
+          continue
       let encCtx =
-        if frameType == AVMEDIA_TYPE_VIDEO:
-          vEncCtx
-        else:
-          var aEncCtx: ptr AVCodecContext = nil
-          for i, stream in audioStreams:
-            if stream == outputStream:
-              aEncCtx = audioEncoders[i]
-              break
-          aEncCtx
+        if frameType == AVMEDIA_TYPE_VIDEO: vEncCtx
+        else: audioEncoders[audioIndex]
 
       for outPacket in encCtx.encode(frame, outPacket):
         outPacket.stream_index = outputStream.index
@@ -525,6 +565,11 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
       if frameType == AVMEDIA_TYPE_AUDIO:
         av_frame_free(addr frame)
 
+    when audioEncoderThreads:
+      for i, t in audioThreads:
+        for pkt in t.ready:
+          muxAudio(i, pkt)
+
   bar.`end`()
 
   # Flush streams
@@ -535,12 +580,17 @@ proc makeMedia*(args: mainArgs, inputVideo: VideoSettings, audio: AudioSettings,
       output.mux(outPacket[])
       av_packet_unref(outPacket)
 
-  for i, aEncCtx in audioEncoders:
-    for outPacket in aEncCtx.encode(nil, outPacket):
-      outPacket.stream_index = audioStreams[i].index
-      av_packet_rescale_ts(outPacket, aEncCtx.time_base, audioStreams[i].time_base)
-      output.mux(outPacket[])
-      av_packet_unref(outPacket)
+  when audioEncoderThreads:
+    for i, t in audioThreads:
+      for pkt in t.finish:
+        muxAudio(i, pkt)
+  else:
+    for i, aEncCtx in audioEncoders:
+      for outPacket in aEncCtx.encode(nil, outPacket):
+        outPacket.stream_index = audioStreams[i].index
+        av_packet_rescale_ts(outPacket, aEncCtx.time_base, audioStreams[i].time_base)
+        output.mux(outPacket[])
+        av_packet_unref(outPacket)
 
   # Copy embedded images
   for (outStream, cachedPkt) in imageStreams:
