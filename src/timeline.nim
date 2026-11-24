@@ -158,7 +158,7 @@ proc mutHelper(tl: var v3, mi: MediaInfo, clips: seq[Clip]) =
 
   if audioStreams.len > 0:
     tl.sr = mi.a[audioStreams[0]].sampleRate
-    tl.layout = initLayout(mi.a[audioStreams[0]].layout)
+    tl.layout = initSourceLayout(mi.a[audioStreams[0]].layout)
   else:
     tl.sr = 48000
     tl.layout = initLayout("stereo")

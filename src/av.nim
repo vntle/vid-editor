@@ -762,6 +762,15 @@ proc initLayout*(layout: string): ref AVChannelLayout =
   if av_channel_layout_from_string(addr result[], layout.cstring) < 0:
     error "Invalid layout"
 
+proc initSourceLayout*(layout: string): ref AVChannelLayout =
+  ## A source's layout to render with. A count without positions, as raw PCM
+  ## in a MOV often has ("2 channels"), takes the usual one for that many
+  ## channels: encoders such as AAC, and the MP4 muxer, refuse it as it is.
+  result = initLayout(layout)
+  if result.order == 0 and result.nb_channels > 0: # AV_CHANNEL_ORDER_UNSPEC
+    # An unspecified order holds no map to free first.
+    av_channel_layout_default(addr result[], result.nb_channels)
+
 proc channelNames*(layout: string): seq[string] =
   var parsed, defaulted: AVChannelLayout
   if av_channel_layout_from_string(addr parsed, layout.cstring) < 0:
