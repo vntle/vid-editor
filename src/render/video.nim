@@ -949,10 +949,15 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
       (demuxer == "image2" or demuxer.endsWith("_pipe")))
 
   let (targetWidth, targetHeight) = scaledVideoResolution(tl.res, video.scale)
-  var fxGraph: Graph = nil
-  var fxKey: GraphKey
-  var rotGraph: Graph = nil # static source rotation, applied before the fit
-  var rotKey: GraphKey
+  # Configured single-input effect graphs (and static source rotations), one
+  # per key. A frame can run several: a chain like `blur,brightness`, or an
+  # effect on each layer. With one slot they took turns, so every frame tore
+  # down and rebuilt each of them (its slice-thread pool, format negotiation,
+  # swscale and filter init). A graph stays while frames keep using it and
+  # is freed once a whole frame passes without it, so an animated effect,
+  # whose key changes every frame, holds at most two.
+  var fxGraphs: seq[tuple[key: GraphKey, g: Graph, used: int64]] = @[]
+  var fxGraph: Graph = nil # the graph `useFxGraph` last selected or created
   # Cached mask/confine mattes (gray8), rebuilt only when the region/size changes
   # so the per-pixel shape math runs once, not every frame.
   var maskMatte: ptr AVFrame = nil
@@ -1175,6 +1180,19 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
 
   debug &"isLinear: {isLinear}"
 
+  proc useFxGraph(k: GraphKey): bool =
+    ## Select the configured graph for `k` as `fxGraph` and return true, or
+    ## make `fxGraph` a new, empty graph for `k` that the caller must build and
+    ## configure, and return false.
+    for e in fxGraphs.mitems:
+      if e.key == k:
+        e.used = frameNo
+        fxGraph = e.g
+        return true
+    fxGraph = newGraph()
+    fxGraphs.add (key: k, g: fxGraph, used: frameNo)
+    false
+
   proc keyOverBg(frame0: ptr AVFrame, effect: Action): ptr AVFrame =
     var frame = frame0
     let w = frame.width
@@ -1349,17 +1367,13 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
       e.ramp(kf, kt, frameSpan(clipDur, fps)).at(local)
 
     # Run `frame` through the effect graph identified by `key`, reusing the
-    # previous graph when the key matches; `build` must add nodes to `fxGraph`
-    # and configure it. When the active `confine` covers this effect, run it on a
-    # copy and merge only the masked region back over the untouched frame.
+    # configured graph for that key if there is one; otherwise `build` must add
+    # nodes to `fxGraph` and configure it. When the active `confine` covers this
+    # effect, run it on a copy and merge only the masked region back over the
+    # untouched frame.
     template runFx(key: GraphKey, build: untyped) =
-      let k = key
-      if fxKey != k:
-        if fxGraph != nil:
-          fxGraph.cleanup()
-        fxGraph = newGraph()
+      if not useFxGraph(key):
         build
-        fxKey = k
       if confineThis:
         let matte = cachedMatte(confineMatte, confineMatteKey, frame, confineEffect)
         let saved = av_frame_clone(frame)
@@ -1862,18 +1876,14 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
           break
       if rotStatic != 0.0'f32:
         let rad = rotStatic * 3.14159265358979'f32 / 180.0'f32
-        let rk = fxId(actRotate, frame, f0 = rad)
-        if rotKey != rk:
-          if rotGraph != nil: rotGraph.cleanup()
-          rotGraph = newGraph()
-          let bsrc = rotGraph.add("buffer", bufArgsOf(frame))
-          let filt = rotGraph.add("rotate", &"a={rad}:ow=rotw({rad}):oh=roth({rad}):c={bg}")
-          let bsink = rotGraph.add("buffersink")
-          rotGraph.linkNodes(bsrc, filt, bsink).configure()
-          rotKey = rk
-        rotGraph.push(frame)
+        if not useFxGraph(fxId(actRotate, frame, f0 = rad)):
+          let bsrc = fxGraph.add("buffer", bufArgsOf(frame))
+          let filt = fxGraph.add("rotate", &"a={rad}:ow=rotw({rad}):oh=roth({rad}):c={bg}")
+          let bsink = fxGraph.add("buffersink")
+          fxGraph.linkNodes(bsrc, filt, bsink).configure()
+        fxGraph.push(frame)
         av_frame_free(addr frame)
-        frame = rotGraph.pull()
+        frame = fxGraph.pull()
 
     st.frameIndex = frameIndex
     st.seekThreshold = seekThreshold
@@ -2115,6 +2125,15 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
         var df = f
         av_frame_free(addr df)
       decodedCache.clear()
+      # Free the effect graphs the previous frame didn't use.
+      var keptGraphs = 0
+      for i in 0 ..< fxGraphs.len:
+        if fxGraphs[i].used >= frameNo - 1:
+          fxGraphs[keptGraphs] = fxGraphs[i]
+          inc keptGraphs
+        else:
+          fxGraphs[i].g.cleanup()
+      fxGraphs.setLen(keptGraphs)
 
       for layerIdx in 0 ..< tl.v.len:
         # An alias: a loop variable here would copy the layer every frame, as
@@ -2347,10 +2366,10 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
 
       yield (frame, index)
 
-    if fxGraph != nil:
-      fxGraph.cleanup()
-    if rotGraph != nil:
-      rotGraph.cleanup()
+    for e in fxGraphs:
+      e.g.cleanup()
+    fxGraphs.setLen(0)
+    fxGraph = nil
     burner.close()
     if maskMatte != nil: av_frame_free(addr maskMatte)
     if confineMatte != nil: av_frame_free(addr confineMatte)
