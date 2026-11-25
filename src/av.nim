@@ -1,7 +1,7 @@
 import std/[math, strformat, strutils, sequtils, tables]
 
 import ./[ffmpeg, log]
-import ./util/[lang, rational]
+import ./util/[lang, rational, suggest]
 import ./lib/audioutil
 
 var useWebCodecs* = false
@@ -262,7 +262,8 @@ type InputContainer* = object
 proc openFormatCtx*(file: cstring): ptr AVFormatContext {.raises: [IOError].} =
   var ret = avformat_open_input(addr result, file, nil, nil)
   if ret == AVERROR(ENOENT):
-    raise newException(IOError, &"Input file doesn't exist: {file}")
+    raise newException(IOError,
+      &"Input file doesn't exist: {file}" & similarFile($file))
   elif ret == AVERROR_INVALIDDATA:
     raise newException(IOError, &"Invalid media data: {file}")
   elif ret != 0:

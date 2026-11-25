@@ -701,6 +701,12 @@ judge making cuts.
           error &"Input file doesn't exist: {myInput}"
         error &"Option/Input file doesn't exist: {myInput}"
       error &"Input file must have an extension: {myInput}"
+    elif agSplitFile(myInput).ext in [".v1", ".v2", ".v3", ".json", ".xml",
+        ".fcpxml", ".fcpxmld"] and not fileExists(myInput) and
+        not dirExists(myInput):
+      # Timelines are read as text, not opened as media, so check here: a
+      # missing one would otherwise end in an unhandled IOError.
+      error &"Input file doesn't exist: {myInput}{similarFile(myInput)}"
 
   editMedia(args, video, audio)
 
